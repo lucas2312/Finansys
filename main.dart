@@ -2,11 +2,19 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:intl/intl.dart';
 import 'dart:convert';
+import 'package:firebase_core/firebase_core.dart';
+import 'firebase_options.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized(); 
+  
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
+  
   runApp(const FinansysApp());
 }
-
 
 String formatearDinero(double monto) {
   double montoCerrado = (monto / 1000).floor() * 1000.0;
@@ -37,7 +45,7 @@ class FinansysApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF2E7D32)),
         useMaterial3: true,
       ),
-      home: const ConfigPage(),
+      home: const AuthGate(),
     );
   }
 }
@@ -166,6 +174,10 @@ class _DashboardPageState extends State<DashboardPage> {
   double balanceDisponible = 0;
   double gastoDiarioPermitido = 0;
 
+  String estadoFinanciero = "Equilibrio"; 
+  Color colorEstado = Colors.grey; 
+  double cuantoGenerarHoy = 0;
+
   List<Map<String, dynamic>> historialMes = [];
   List<Map<String, dynamic>> historialHoy = [];
 
@@ -202,7 +214,7 @@ class _DashboardPageState extends State<DashboardPage> {
     recalcularDashboard();
   }
 
-  void recalcularDashboard() {
+void recalcularDashboard() {
     ingresosExtraDelMes = 0;
     gastosVariablesDelMes = 0;
 
@@ -237,24 +249,46 @@ class _DashboardPageState extends State<DashboardPage> {
     }
 
     setState(() {
+      // 1. CÁLCULO DEL BALANCE MENSUAL (REQ 9)
       double ingresosTotales = ingresoBaseMensual + ingresosExtraDelMes;
       double gastosTotales = gastosFijosMensuales + gastosVariablesDelMes;
-      balanceDisponible = ingresosTotales - gastosTotales;
+      balanceDisponible = ingresosTotales - gastosTotales; // REQ 12 (Tiempo real)
 
-      double balanceAlDespertar = (ingresoBaseMensual + ingresosAnteriores) - (gastosFijosMensuales + gastosAnteriores);
-      
-      int diasRestantes = diasRestantesDelMes();
-      
-      double baseDiaria = 0;
-      if (balanceAlDespertar > 0) {
-        baseDiaria = balanceAlDespertar / diasRestantes;
+      // 2. IDENTIFICAR ESTADO (REQ 10 y 15)
+      if (balanceDisponible < 0) {
+        estadoFinanciero = "Descuadre";
+        colorEstado = Colors.red;
+      } else if (balanceDisponible == 0) {
+        estadoFinanciero = "Equilibrio";
+        colorEstado = Colors.orange;
+      } else {
+        estadoFinanciero = "Excedente";
+        colorEstado = Colors.green;
       }
 
-      gastoDiarioPermitido = baseDiaria - gastosHoy + ingresosHoy;
+      // 3. CÁLCULO DIARIO (REQ 11 y 14)
+      int dias = diasRestantesDelMes();
+      
+      // Balance que había antes de los movimientos de hoy (Acumulación implícita REQ 13)
+      double balanceAlDespertar = (ingresoBaseMensual + ingresosAnteriores) - (gastosFijosMensuales + gastosAnteriores);
+
+      if (balanceDisponible < 0) {
+        // En DESCUADRE: Calculamos cuánto debe generar (REQ 11)
+        gastoDiarioPermitido = 0;
+        // Dividimos la deuda total entre los días que quedan para que sepa cuánto "camellar" diario
+        cuantoGenerarHoy = (balanceAlDespertar.abs() / dias) + gastosHoy - ingresosHoy;
+        if (cuantoGenerarHoy < 0) cuantoGenerarHoy = 0;
+      } else {
+        // En EXCEDENTE: Calculamos cuánto puede gastar (REQ 11)
+        cuantoGenerarHoy = 0;
+        double baseDiaria = balanceAlDespertar / dias;
+        // El ajuste automático (REQ 14) ocurre porque 'baseDiaria' cambia cada día que 'dias' disminuye
+        gastoDiarioPermitido = baseDiaria - gastosHoy + ingresosHoy;
+      }
     });
   }
 
-  Future<void> eliminarMovimiento(String fechaEliminar) async {
+ Future<void> eliminarMovimiento(String fechaEliminar) async {
     bool? confirmar = await showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -292,7 +326,6 @@ class _DashboardPageState extends State<DashboardPage> {
       recalcularDashboard();
     }
   }
-
   Future<void> registrarMovimiento(bool esGasto) async {
     final montoController = TextEditingController();
     final descripcionController = TextEditingController();
@@ -314,12 +347,8 @@ class _DashboardPageState extends State<DashboardPage> {
                     decoration: const InputDecoration(labelText: "Monto (\$)", hintText: "Ej: 15000"),
                   ),
                   const SizedBox(height: 10),
-                  
                   InputDecorator(
-                    decoration: const InputDecoration(
-                      labelText: 'Categoría',
-                      contentPadding: EdgeInsets.symmetric(horizontal: 0, vertical: 0),
-                    ),
+                    decoration: const InputDecoration(labelText: 'Categoría'),
                     child: DropdownButtonHideUnderline(
                       child: DropdownButton<String>(
                         value: categoriaSeleccionada,
@@ -335,7 +364,6 @@ class _DashboardPageState extends State<DashboardPage> {
                       ),
                     ),
                   ),
-
                   const SizedBox(height: 10),
                   TextField(
                     controller: descripcionController,
@@ -358,7 +386,7 @@ class _DashboardPageState extends State<DashboardPage> {
                 )
               ],
             );
-          }
+          },
         );
       },
     ).then((resultado) async {
@@ -392,14 +420,14 @@ class _DashboardPageState extends State<DashboardPage> {
       }
     });
   }
-
-  @override
+@override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text("Finansys - Dashboard"),
         backgroundColor: Colors.green.shade100,
         actions: [
+          // 1. Botón de Configuración (El que ya tenías)
           IconButton(
             icon: const Icon(Icons.settings),
             onPressed: () {
@@ -408,14 +436,48 @@ class _DashboardPageState extends State<DashboardPage> {
                 MaterialPageRoute(builder: (context) => const ConfigPage()),
               );
             },
+          ),
+          // 2. ¡NUEVO! Botón de Cerrar Sesión
+          IconButton(
+            icon: Icon(Icons.logout, color: Colors.red.shade700),
+            tooltip: "Cerrar sesión",
+            onPressed: () async {
+              // Le decimos a Firebase que cierre la sesión actual
+              await FirebaseAuth.instance.signOut();
+              
+              if (!context.mounted) return;
+              
+              // Mandamos al usuario de vuelta a la pantalla de Login y borramos el historial
+              Navigator.pushAndRemoveUntil(
+                context,
+                MaterialPageRoute(builder: (context) => const AuthGate()),
+                (route) => false, 
+              );
+            },
           )
         ],
       ),
+// ... De aquí para abajo sigue tu body: SingleChildScrollView normal
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(15),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            Center(
+  child: Container(
+    margin: const EdgeInsets.symmetric(vertical: 10),
+    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+    decoration: BoxDecoration(
+      color: colorEstado.withOpacity(0.2),
+      borderRadius: BorderRadius.circular(20),
+      border: Border.all(color: colorEstado, width: 2),
+    ),
+    child: Text(
+      "ESTADO: ${estadoFinanciero.toUpperCase()}",
+      style: TextStyle(color: colorEstado, fontWeight: FontWeight.bold, fontSize: 18),
+    ),
+  ),
+),
             const Text("Resumen del Mes", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.grey)),
             const SizedBox(height: 10),
             Container(
@@ -446,19 +508,34 @@ class _DashboardPageState extends State<DashboardPage> {
 
             Card(
               elevation: 4,
-              color: gastoDiarioPermitido >= 0 ? Colors.green.shade50 : Colors.red.shade50,
+              // Aquí la magia: usa el color que calculamos en recalcularDashboard
+              color: colorEstado.withOpacity(0.15), 
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
               child: Padding(
                 padding: const EdgeInsets.all(20),
                 child: Column(
                   children: [
-                    Text("Dinero que puedes gastar hoy", style: TextStyle(fontSize: 16, color: Colors.grey.shade700)),
+                    Text(
+                      estadoFinanciero == "Descuadre" 
+                          ? "Debes generar hoy para equilibrarte:" 
+                          : "Dinero que puedes gastar hoy",
+                      style: TextStyle(fontSize: 16, color: Colors.grey.shade700),
+                    ),
                     Text("(Quedan ${diasRestantesDelMes()} días en el mes)", style: const TextStyle(fontSize: 12, color: Colors.grey)),
                     const SizedBox(height: 10),
                     Text(
-                      formatearDinero(gastoDiarioPermitido),
-                      style: TextStyle(fontSize: 38, fontWeight: FontWeight.bold, color: gastoDiarioPermitido >= 0 ? Colors.green.shade800 : Colors.red),
-                    ),
+  // Si el gasto permitido es negativo, mostramos 0 $ para no confundir al usuario
+  formatearDinero(
+    estadoFinanciero == "Descuadre" 
+      ? cuantoGenerarHoy 
+      : (gastoDiarioPermitido < 0 ? 0 : gastoDiarioPermitido)
+  ),
+  style: TextStyle(
+    fontSize: 38, 
+    fontWeight: FontWeight.bold, 
+    color: estadoFinanciero == "Descuadre" ? Colors.red : Colors.green.shade800
+  ),
+),
                   ],
                 ),
               ),
@@ -522,6 +599,154 @@ class _DashboardPageState extends State<DashboardPage> {
                 );
               }),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+
+class AuthGate extends StatelessWidget {
+  const AuthGate({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<User?>(
+    
+      stream: FirebaseAuth.instance.authStateChanges(),
+      builder: (context, snapshot) {
+      
+        if (snapshot.hasData) {
+          return const DashboardPage(); 
+        }
+       
+        return const LoginPage();
+      },
+    );
+  }
+}
+
+class LoginPage extends StatefulWidget {
+  const LoginPage({super.key});
+
+  @override
+  State<LoginPage> createState() => _LoginPageState();
+}
+class _LoginPageState extends State<LoginPage> {
+  final emailController = TextEditingController();
+  final passwordController = TextEditingController();
+  bool isLoading = false;
+
+
+  Future<void> iniciarSesion() async {
+    setState(() => isLoading = true);
+    try {
+      await FirebaseAuth.instance.signInWithEmailAndPassword(
+        email: emailController.text.trim(),
+        password: passwordController.text.trim(),
+      );
+    } on FirebaseAuthException catch (e) {
+      if (!mounted) return; 
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Error: Verifica tu correo y contraseña. (${e.code})")),
+      );
+    }
+    if (mounted) {
+      setState(() => isLoading = false);
+    }
+  }
+
+  
+  Future<void> registrarse() async {
+    setState(() => isLoading = true);
+    try {
+      await FirebaseAuth.instance.createUserWithEmailAndPassword(
+        email: emailController.text.trim(),
+        password: passwordController.text.trim(),
+      );
+      if (!mounted) return; 
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("¡Cuenta creada con éxito!", style: TextStyle(color: Colors.white)), backgroundColor: Colors.green),
+      );
+    } on FirebaseAuthException catch (e) {
+      if (!mounted) return; 
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Error al registrarse: ${e.code}")),
+      );
+    }
+    if (mounted) {
+      setState(() => isLoading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.white,
+      body: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(25),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.lock_person, size: 100, color: Colors.green),
+              const SizedBox(height: 20),
+              const Text(
+                "Finansys",
+                style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Colors.green),
+              ),
+              const Text("Controla tu dinero hoy"),
+              const SizedBox(height: 40),
+              
+              TextField(
+                controller: emailController,
+                keyboardType: TextInputType.emailAddress,
+                decoration: const InputDecoration(
+                  labelText: "Correo Electrónico",
+                  prefixIcon: Icon(Icons.email),
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 20),
+              
+              TextField(
+                controller: passwordController,
+                obscureText: true, 
+                decoration: const InputDecoration(
+                  labelText: "Contraseña",
+                  prefixIcon: Icon(Icons.key),
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 30),
+
+              
+              isLoading 
+                ? const CircularProgressIndicator(color: Colors.green)
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      ElevatedButton(
+                        onPressed: iniciarSesion,
+                        style: ElevatedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(vertical: 15),
+                          backgroundColor: Colors.green.shade700,
+                          foregroundColor: Colors.white,
+                        ),
+                        child: const Text("Iniciar Sesión", style: TextStyle(fontSize: 18)),
+                      ),
+                      const SizedBox(height: 15),
+                      TextButton(
+                        onPressed: registrarse,
+                        child: const Text(
+                          "¿No tienes cuenta? Regístrate aquí",
+                          style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ],
+                  ),
+            ],
+          ),
         ),
       ),
     );
